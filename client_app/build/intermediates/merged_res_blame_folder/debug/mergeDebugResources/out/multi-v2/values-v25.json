@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.projection.screen.client.client_app-mergeDebugResources-29:/values-v25/values-v25.xml",
+            "map": [
+                {
+                    "source": "/Users/pucheng/.gradle/caches/8.13/transforms/2adc5c2f28e1705ca8a3b33ca36fb96f/transformed/appcompat-1.6.1/res/values-v25/values-v25.xml",
+                    "from": {
+                        "startLines": "2,3,4,6",
+                        "startColumns": "4,4,4,4",
+                        "startOffsets": "55,126,209,308",
+                        "endLines": "2,3,5,7",
+                        "endColumns": "70,82,12,12",
+                        "endOffsets": "121,204,303,414"
+                    }
+                }
+            ]
+        }
+    ]
+}

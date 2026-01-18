@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "com.projection.screen.client.client_app-mergeDebugResources-30:/layout/activity_main.xml",
+        "source": "com.projection.screen.client.client_app-main-33:/layout/activity_main.xml"
+    },
+    {
+        "merged": "/Users/pucheng/.gradle/daemon/8.13/com.projection.screen.client.client_app-mergeDebugResources-30:/layout/activity_main.xml",
+        "source": "/Users/pucheng/.gradle/daemon/8.13/com.projection.screen.client.client_app-main-33:/layout/activity_main.xml"
+    }
+]

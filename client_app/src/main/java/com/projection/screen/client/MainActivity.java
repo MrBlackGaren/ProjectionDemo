@@ -37,9 +37,6 @@ import java.util.concurrent.TimeUnit;
 public class MainActivity extends Activity implements SurfaceHolder.Callback, View.OnTouchListener {
     private static final String TAG = "ClientDisplay";
     private static final int PORT = 8888;
-    private static final int WIDTH = 1280;
-    private static final int HEIGHT = 720;
-
     private SurfaceView surfaceView;
     private SurfaceHolder surfaceHolder;
     private TextView tvIpAddress;
@@ -85,7 +82,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
     private long lastHeartbeatTime = 0;
     private static final int HEARTBEAT_CHECK_INTERVAL = 5000; // 5秒检查一次
     private static final int HEARTBEAT_TIMEOUT = 10000; // 10秒没收到心跳视为断开
-    private static final byte[] HEARTBEAT_DATA = new byte[]{'H', 'B'}; // 心跳数据包
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -545,34 +541,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
             }
         }
     }
-    
-    /**
-     * 移除H.264数据中的起始码（0x00000001或0x000001）
-     * @param data 包含起始码的H.264数据
-     * @return 移除起始码后的数据
-     */
-    private byte[] removeStartCode(byte[] data) {
-        if (data == null || data.length < 4) {
-            return data;
-        }
-        
-        // 检查是否包含4字节起始码
-        if (data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
-            byte[] cleanData = new byte[data.length - 4];
-            System.arraycopy(data, 4, cleanData, 0, cleanData.length);
-            return cleanData;
-        }
-        
-        // 检查是否包含3字节起始码
-        if (data[0] == 0 && data[1] == 0 && data[2] == 1) {
-            byte[] cleanData = new byte[data.length - 3];
-            System.arraycopy(data, 3, cleanData, 0, cleanData.length);
-            return cleanData;
-        }
-        
-        // 没有起始码，直接返回原数据
-        return data;
-    }
 
     /**
      * 接收H.264数据
@@ -967,61 +935,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
         }
     }
     
-    /**
-     * 处理解码器输出缓冲区
-     */
-    private void drainOutputBuffer() {
-        if (mediaCodec == null) {
-            Log.w(TAG, "drainOutputBuffer: mediaCodec为null");
-            return;
-        }
-        
-        try {
-            MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-            int outputBufferIndex;
-            int renderedFrames = 0;
-            
-            // 持续处理所有可用的输出缓冲区
-            while (true) {
-                outputBufferIndex = mediaCodec.dequeueOutputBuffer(bufferInfo, 50000); // 增加到50ms
-                
-                if (outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    // 暂时没有可用的输出缓冲区
-                    if (renderedFrames > 0) {
-                        Log.i(TAG, "本次共渲染 " + renderedFrames + " 帧");
-                    }
-                    break;
-                } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    MediaFormat newFormat = mediaCodec.getOutputFormat();
-                    Log.i(TAG, "输出格式已更改: " + newFormat);
-                    continue;
-                } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
-                    Log.i(TAG, "输出缓冲区已更改");
-                    continue;
-                } else if (outputBufferIndex >= 0) {
-                    if (bufferInfo.size > 0) {
-                        // 渲染解码后的数据到Surface
-                        mediaCodec.releaseOutputBuffer(outputBufferIndex, true);
-                        renderedFrames++;
-                        Log.i(TAG, "帧已渲染到Surface, 时间戳=" + bufferInfo.presentationTimeUs + ", flags=" + bufferInfo.flags);
-                    } else {
-                        mediaCodec.releaseOutputBuffer(outputBufferIndex, false);
-                    }
-                    // 继续处理下一个输出缓冲区
-                    continue;
-                } else {
-                    Log.w(TAG, "获取输出缓冲区返回未知值: " + outputBufferIndex);
-                    break;
-                }
-            }
-        } catch (IllegalStateException e) {
-            // 不要在并发冲突时重置解码器
-            Log.w(TAG, "处理输出缓冲区时MediaCodec状态警告: " + e.getMessage());
-        } catch (Exception e) {
-            Log.e(TAG, "处理输出缓冲区异常: " + e.getMessage(), e);
-        }
-    }
-    
     // 单独的输出处理线程，持续轮询解码器输出
     private Thread outputThread;
     private volatile boolean outputThreadRunning = false;
@@ -1098,44 +1011,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
             mediaCodec = null;
         }
     }
-
-    /**
-     * 检查是否是SPS帧
-     */
-    private boolean isSPSFrame(byte[] data) {
-        // 检查4字节起始码的情况
-        if (data.length >= 5 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
-            int nalType = data[4] & 0x1F; // 提取NAL类型（低5位）
-            return nalType == 7; // SPS的NAL类型是7
-        }
-        
-        // 检查3字节起始码的情况
-        if (data.length >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1) {
-            int nalType = data[3] & 0x1F; // 提取NAL类型（低5位）
-            return nalType == 7; // SPS的NAL类型是7
-        }
-        
-        return false;
-    }
-    
-    /**
-     * 检查是否是PPS帧
-     */
-    private boolean isPPSFrame(byte[] data) {
-        // 检查4字节起始码的情况
-        if (data.length >= 5 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
-            int nalType = data[4] & 0x1F; // 提取NAL类型（低5位）
-            return nalType == 8; // PPS的NAL类型是8
-        }
-        
-        // 检查3字节起始码的情况
-        if (data.length >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1) {
-            int nalType = data[3] & 0x1F; // 提取NAL类型（低5位）
-            return nalType == 8; // PPS的NAL类型是8
-        }
-        
-        return false;
-    }
     
     /**
      * 将字节数组转换为十六进制字符串
@@ -1152,262 +1027,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
     }
     
     /**
-     * 从SPS数据中提取视频分辨率
-     * @param sps SPS数据
-     * @return 视频分辨率数组 [width, height]
-     */
-    private int[] getVideoResolutionFromSPS(byte[] sps) {
-        try {
-            ByteBuffer buffer = ByteBuffer.wrap(sps);
-            
-            // 跳过起始码
-            int startCodeSize = (sps[0] == 0 && sps[1] == 0 && sps[2] == 0 && sps[3] == 1) ? 4 : 3;
-            buffer.position(startCodeSize);
-            
-            // 跳过nal_unit_type、profile_idc、constraint_set_flags、level_idc
-            buffer.position(buffer.position() + 4);
-            
-            // 解析seq_parameter_set_id（ue(v)）
-            skipUEGolomb(buffer);
-            
-            // 解析profile_idc相关参数
-            int profileIdc = sps[startCodeSize];
-            if (profileIdc == 100 || profileIdc == 110 || profileIdc == 122 || 
-                profileIdc == 244 || profileIdc == 44 || profileIdc == 83 || 
-                profileIdc == 86 || profileIdc == 118 || profileIdc == 128) {
-                // 跳过chroma_format_idc（ue(v)）
-                skipUEGolomb(buffer);
-                
-                // 跳过bit_depth_luma_minus8（ue(v)）
-                skipUEGolomb(buffer);
-                
-                // 跳过bit_depth_chroma_minus8（ue(v)）
-                skipUEGolomb(buffer);
-                
-                // 跳过qpprime_y_zero_transform_bypass_flag（1 bit）
-                buffer.position(buffer.position() + 1);
-                
-                // 跳过seq_scaling_matrix_present_flag（1 bit）
-                if (buffer.get(buffer.position()) != 0) {
-                    buffer.position(buffer.position() + 1);
-                    // 跳过缩放矩阵
-                    int scalingMatrixCount = 8;
-                    for (int i = 0; i < scalingMatrixCount; i++) {
-                        if (buffer.get(buffer.position()) != 0) {
-                            buffer.position(buffer.position() + 1);
-                            for (int j = 0; j < (i < 6 ? 16 : 64); j++) {
-                                skipUEGolomb(buffer);
-                            }
-                        } else {
-                            buffer.position(buffer.position() + 1);
-                        }
-                    }
-                } else {
-                    buffer.position(buffer.position() + 1);
-                }
-            }
-            
-            // 跳过log2_max_frame_num_minus4（ue(v)）
-            skipUEGolomb(buffer);
-            
-            // 解析pic_order_cnt_type（ue(v)）
-            int picOrderCntType = readUEGolomb(buffer);
-            if (picOrderCntType == 0) {
-                // 跳过log2_max_pic_order_cnt_lsb_minus4（ue(v)）
-                skipUEGolomb(buffer);
-            } else if (picOrderCntType == 1) {
-                // 跳过delta_pic_order_always_zero_flag（1 bit）
-                buffer.position(buffer.position() + 1);
-                
-                // 跳过offset_for_non_ref_pic（se(v)）
-                skipSEGolomb(buffer);
-                
-                // 跳过offset_for_top_to_bottom_field（se(v)）
-                skipSEGolomb(buffer);
-                
-                // 跳过num_ref_frames_in_pic_order_cnt_cycle（ue(v)）
-                int numRefFrames = readUEGolomb(buffer);
-                for (int i = 0; i < numRefFrames; i++) {
-                    skipSEGolomb(buffer);
-                }
-            }
-            
-            // 跳过num_ref_frames（ue(v)）
-            skipUEGolomb(buffer);
-            
-            // 跳过gaps_in_frame_num_value_allowed_flag（1 bit）
-            buffer.position(buffer.position() + 1);
-            
-            // 解析pic_width_in_mbs_minus1（ue(v)）
-            int picWidthInMbsMinus1 = readUEGolomb(buffer);
-            
-            // 解析pic_height_in_map_units_minus1（ue(v)）
-            int picHeightInMapUnitsMinus1 = readUEGolomb(buffer);
-            
-            // 解析frame_mbs_only_flag（1 bit）
-            boolean frameMbsOnlyFlag = (buffer.get(buffer.position()) != 0);
-            buffer.position(buffer.position() + 1);
-            
-            // 解析mb_adaptive_frame_field_flag（1 bit）
-            boolean mbAdaptiveFrameFieldFlag = false;
-            if (!frameMbsOnlyFlag) {
-                mbAdaptiveFrameFieldFlag = (buffer.get(buffer.position()) != 0);
-                buffer.position(buffer.position() + 1);
-            }
-            
-            // 跳过direct_8x8_inference_flag（1 bit）
-            buffer.position(buffer.position() + 1);
-            
-            // 解析frame_cropping_flag（1 bit）
-            boolean frameCroppingFlag = (buffer.get(buffer.position()) != 0);
-            buffer.position(buffer.position() + 1);
-            
-            // 解析裁剪参数
-            int frameCropLeftOffset = 0;
-            int frameCropRightOffset = 0;
-            int frameCropTopOffset = 0;
-            int frameCropBottomOffset = 0;
-            if (frameCroppingFlag) {
-                frameCropLeftOffset = readUEGolomb(buffer);
-                frameCropRightOffset = readUEGolomb(buffer);
-                frameCropTopOffset = readUEGolomb(buffer);
-                frameCropBottomOffset = readUEGolomb(buffer);
-            }
-            
-            // 计算实际视频宽度和高度
-            int macroblockSize = 16;
-            int width = (picWidthInMbsMinus1 + 1) * macroblockSize;
-            int height = (picHeightInMapUnitsMinus1 + 1) * macroblockSize * (frameMbsOnlyFlag ? 1 : 2);
-            
-            // 应用裁剪
-            width -= (frameCropLeftOffset + frameCropRightOffset) * 2;
-            height -= (frameCropTopOffset + frameCropBottomOffset) * 2;
-            
-            // 确保宽度和高度为正数
-            width = Math.max(width, 0);
-            height = Math.max(height, 0);
-            
-            return new int[]{width, height};
-            
-        } catch (Exception e) {
-            Log.e(TAG, "解析SPS数据获取视频分辨率失败: " + e.getMessage(), e);
-            // 如果解析失败，返回默认分辨率
-            return new int[]{WIDTH, HEIGHT};
-        }
-    }
-    
-    /**
-     * 读取并跳过一个无符号指数哥伦布编码值
-     * @param buffer 包含数据的ByteBuffer
-     */
-    private void skipUEGolomb(ByteBuffer buffer) {
-        int leadingZeroBits = 0;
-        while (buffer.position() < buffer.limit() && buffer.get(buffer.position()) == 0) {
-            leadingZeroBits++;
-            buffer.position(buffer.position() + 1);
-        }
-        buffer.position(buffer.position() + leadingZeroBits + 1);
-    }
-    
-    /**
-     * 读取一个无符号指数哥伦布编码值
-     * @param buffer 包含数据的ByteBuffer
-     * @return 解析出的无符号整数
-     */
-    private int readUEGolomb(ByteBuffer buffer) {
-        int leadingZeroBits = 0;
-        while (buffer.position() < buffer.limit() && buffer.get(buffer.position()) == 0) {
-            leadingZeroBits++;
-            buffer.position(buffer.position() + 1);
-        }
-        
-        if (buffer.position() >= buffer.limit()) {
-            return 0;
-        }
-        
-        int value = 0;
-        for (int i = 0; i < leadingZeroBits + 1; i++) {
-            if (buffer.position() < buffer.limit()) {
-                value <<= 1;
-                value |= buffer.get(buffer.position());
-                buffer.position(buffer.position() + 1);
-            }
-        }
-        
-        return value - 1;
-    }
-    
-    /**
-     * 读取并跳过一个有符号指数哥伦布编码值
-     * @param buffer 包含数据的ByteBuffer
-     */
-    private void skipSEGolomb(ByteBuffer buffer) {
-        int value = readUEGolomb(buffer);
-        // 无符号值转换为有符号值的计算，但我们只需要跳过，所以不需要实际使用
-    }
-
-    /**
-     * 提取SPS数据
-     */
-    private byte[] extractSPS(byte[] data) {
-        int start = 0;
-        if (data.length >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
-            start = 4;
-        } else if (data.length >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1) {
-            start = 3;
-        }
-        
-        for (int i = start + 1; i < data.length - 3; i++) {
-            if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
-                byte[] sps = new byte[i - start];
-                System.arraycopy(data, start, sps, 0, sps.length);
-                return sps;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 提取PPS数据
-     */
-    private byte[] extractPPS(byte[] data) {
-        int start = 0;
-        if (data.length >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
-            start = 4;
-        } else if (data.length >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1) {
-            start = 3;
-        }
-        
-        // 找到SPS的结束位置
-        int spsEnd = start;
-        for (int i = start + 1; i < data.length - 3; i++) {
-            if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
-                spsEnd = i;
-                break;
-            }
-        }
-        
-        // 找到PPS的结束位置
-        for (int i = spsEnd + 4; i < data.length - 3; i++) {
-            if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
-                byte[] pps = new byte[i - (spsEnd + 4)];
-                System.arraycopy(data, spsEnd + 4, pps, 0, pps.length);
-                return pps;
-            }
-        }
-        
-        // 如果没有找到后续帧，PPS就是剩余的数据
-        if (spsEnd + 4 < data.length) {
-            byte[] pps = new byte[data.length - (spsEnd + 4)];
-            System.arraycopy(data, spsEnd + 4, pps, 0, pps.length);
-            return pps;
-        }
-        
-        return null;
-    }
-
-    /**
-     * 发送触摸事件到客户端
+     * 发送触摸事件到服务端
      */
     // 服务端 VirtualDisplay 的分辨率
     private static final int SERVER_VIDEO_WIDTH = 1280;

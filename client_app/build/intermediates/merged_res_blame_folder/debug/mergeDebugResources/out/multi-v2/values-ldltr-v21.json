@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.projection.screen.client.client_app-mergeDebugResources-29:/values-ldltr-v21/values-ldltr-v21.xml",
+            "map": [
+                {
+                    "source": "/Users/pucheng/.gradle/caches/8.13/transforms/2adc5c2f28e1705ca8a3b33ca36fb96f/transformed/appcompat-1.6.1/res/values-ldltr-v21/values-ldltr-v21.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "112",
+                        "endOffsets": "163"
+                    }
+                }
+            ]
+        }
+    ]
+}

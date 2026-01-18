@@ -9,7 +9,6 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
-import android.media.projection.MediaProjection;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -64,9 +63,6 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     
     /** VirtualDisplay实例，代表一个虚拟显示设备，用于捕获屏幕内容 */
     private VirtualDisplay mVirtualDisplay;
-    
-    /** MediaProjection实例，用于获取屏幕录制权限（需要在外部请求） */
-    private MediaProjection mMediaProjection; 
     
     /** Surface实例，作为编码器的输入目标，虚拟屏内容将渲染到这个Surface上 */
     private Surface mInputSurface;
@@ -670,9 +666,6 @@ public class ScreenCaptureActivity extends AppCompatActivity {
                     // 初始化H.264文件记录
                     initH264Recording();
                     
-                    // 注意：不要发送测试数据，因为它包含的SPS/PPS与实际编码器生成的不一致
-                    // 这会导致客户端解码失败
-                    // sendTestH264Data();
                     
                     // 连接成功后，配置MediaCodec编码器和创建VirtualDisplay
                     // 这会确保客户端能够收到完整的SPS/PPS和I帧
@@ -956,62 +949,6 @@ public class ScreenCaptureActivity extends AppCompatActivity {
             return true;
         }
         return false;
-    }
-    
-    /**
-     * 发送固定的H.264测试数据到客户端
-     * 用于测试网络传输和基础解码流程
-     */
-    private void sendTestH264Data() {
-        if (mSocket == null) {
-            Log.e(TAG, "Socket为空，无法发送测试数据");
-            return;
-        }
-        if (!mSocket.isConnected()) {
-            Log.e(TAG, "Socket未连接，无法发送测试数据");
-            return;
-        }
-        if (mOutputStream == null) {
-            Log.e(TAG, "输出流为空，无法发送测试数据");
-            return;
-        }
-        
-        // 固定的H.264测试数据（包含SPS、PPS和一个简单的I帧）
-        byte[] testData = new byte[] {
-            // SPS (Sequence Parameter Set)
-            (byte)0x00, (byte)0x00, (byte)0x00, (byte)0x01, (byte)0x67, (byte)0x42, (byte)0x00, (byte)0x28, 
-            (byte)0xDA, (byte)0x01, (byte)0x40, (byte)0x50, (byte)0x00, (byte)0x00, (byte)0x03, (byte)0x00, 
-            (byte)0x40, (byte)0x00, (byte)0x00, (byte)0x07, (byte)0xD0, (byte)0x80, (byte)0x11, (byte)0x00, 
-            (byte)0x00, (byte)0x03, (byte)0x00, (byte)0x08, (byte)0x00, (byte)0x00, (byte)0x03, (byte)0x01, 
-            (byte)0x72, (byte)0x00,
-            // PPS (Picture Parameter Set)
-            (byte)0x00, (byte)0x00, (byte)0x00, (byte)0x01, (byte)0x68, (byte)0xCE, (byte)0x38, (byte)0x80,
-            // I帧 (Intra frame)
-            (byte)0x00, (byte)0x00, (byte)0x00, (byte)0x01, (byte)0x65, (byte)0x88, (byte)0x84, (byte)0x01, 
-            (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, 
-            (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, 
-            (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01, (byte)0x01
-        };
-        
-        Log.i(TAG, "开始发送H.264测试数据，总大小: " + testData.length + " 字节");
-        Log.d(TAG, "测试数据前30字节: " + bytesToHex(testData, Math.min(30, testData.length)));
-        
-        try {
-            // 发送测试数据
-            mOutputStream.write(testData);
-            Log.i(TAG, "write方法调用完成，已发送" + testData.length + " 字节");
-            
-            // 刷新输出流
-            mOutputStream.flush();
-            Log.i(TAG, "flush方法调用完成，测试数据发送成功");
-            
-        } catch (IOException e) {
-            Log.e(TAG, "发送测试H.264数据失败: " + e.getMessage(), e);
-            e.printStackTrace();
-        } catch (Exception e) {
-            Log.e(TAG, "发送测试H.264数据时发生未知异常: " + e.getMessage(), e);
-            e.printStackTrace();
-        }
     }
     
     /**

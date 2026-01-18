@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.projection.screen.client.client_app-mergeDebugResources-29:/values-watch-v20/values-watch-v20.xml",
+            "map": [
+                {
+                    "source": "/Users/pucheng/.gradle/caches/8.13/transforms/2adc5c2f28e1705ca8a3b33ca36fb96f/transformed/appcompat-1.6.1/res/values-watch-v20/values-watch-v20.xml",
+                    "from": {
+                        "startLines": "2,5,8",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "55,214,385",
+                        "endLines": "4,7,10",
+                        "endColumns": "12,12,12",
+                        "endOffsets": "209,380,553"
+                    }
+                }
+            ]
+        }
+    ]
+}

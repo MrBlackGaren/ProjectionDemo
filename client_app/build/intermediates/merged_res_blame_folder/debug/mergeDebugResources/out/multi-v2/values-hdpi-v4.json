@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.projection.screen.client.client_app-mergeDebugResources-29:/values-hdpi-v4/values-hdpi-v4.xml",
+            "map": [
+                {
+                    "source": "/Users/pucheng/.gradle/caches/8.13/transforms/2adc5c2f28e1705ca8a3b33ca36fb96f/transformed/appcompat-1.6.1/res/values-hdpi-v4/values-hdpi-v4.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "6",
+                        "endColumns": "13",
+                        "endOffsets": "327"
+                    }
+                }
+            ]
+        }
+    ]
+}
