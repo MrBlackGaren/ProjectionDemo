@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">ClientDisplay</string>
+    <string name="tv_ip_address">IP地址: %s</string>
+    <string name="tv_port">端口: %d</string>
+    <string name="tv_status">状态: %s</string>
+    <string name="status_connected">已连接</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="status_listening">监听中</string>
+</resources>
