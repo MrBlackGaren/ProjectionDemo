@@ -98,7 +98,7 @@ public class TouchEventReceiver {
                 ((data[8] & 0xFF) << 8) |
                 (data[9] & 0xFF);
 
-        Log.d(TAG, "收到触摸事件: action=" + action + ", x=" + x + ", y=" + y);
+        Log.i(TAG, "收到触摸事件: action=" + action + ", x=" + x + ", y=" + y);
 
         // 创建MotionEvent
         long downTime = System.currentTimeMillis();

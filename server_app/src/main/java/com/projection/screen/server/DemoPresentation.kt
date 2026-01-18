@@ -161,12 +161,12 @@ class DemoPresentation : Presentation {
 
     /**
      * 处理触摸事件回调
-     * 当用户在主屏TextureView上触摸时，此方法会被调用
+     * 当用户在客户端触摸时，此方法会被调用
      * @param event 触摸事件对象，包含坐标和动作类型
      * @return true表示事件已处理
      */
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        Log.d(TAG, "Received touch event: action=${event.action}, x=${event.x}, y=${event.y}")
+        Log.i(TAG, "Received touch event: action=${event.action}, x=${event.x}, y=${event.y}")
 
         val actionString = when (event.action) {
             MotionEvent.ACTION_DOWN -> "DOWN"
@@ -189,11 +189,46 @@ class DemoPresentation : Presentation {
         contentView?.invalidate()
 
         Log.d(TAG, "Touch event processed: $actionString at (${event.x}, ${event.y})")
+        
+        // 检查触摸是否在按钮区域内，如果是则手动触发点击
+        // 注意：不能调用 dispatchTouchEvent，会导致无限递归
+        if (event.action == MotionEvent.ACTION_UP) {
+            demoButton?.let { button ->
+                if (isPointInsideView(event.x, event.y, button)) {
+                    Log.i(TAG, "触摸点在按钮区域内，触发点击")
+                    button.performClick()
+                }
+            }
+        }
+        
         return true
     }
+    
+    /**
+     * 检查坐标点是否在指定View区域内
+     */
+    private fun isPointInsideView(x: Float, y: Float, view: android.view.View): Boolean {
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        val viewX = location[0]
+        val viewY = location[1]
+        
+        // 判断触摸点是否在View的边界内
+        return x >= viewX && x <= viewX + view.width &&
+               y >= viewY && y <= viewY + view.height
+    }
 
+    private var buttonClickCount = 0
+    
     private fun showButtonClicked() {
-        Log.i(TAG, "演示按钮被点击")
+        buttonClickCount++
+        Log.i(TAG, "演示按钮被点击，点击次数: $buttonClickCount")
+        
+        // 更新按钮文本显示点击次数
+        demoButton?.text = "已点击 $buttonClickCount 次"
+        
+        // 显示点击反馈
+        touchInfoTextView?.text = "按钮点击！\n总点击次数: $buttonClickCount"
     }
 
     override fun onStart() {

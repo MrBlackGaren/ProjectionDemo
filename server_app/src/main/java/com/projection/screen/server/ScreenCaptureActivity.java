@@ -129,6 +129,7 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     private Handler mHeartbeatHandler;
     private static final int HEARTBEAT_INTERVAL = 3000; // 3秒发送一次心跳
     private static final byte[] HEARTBEAT_DATA = new byte[]{'H', 'B'}; // 心跳数据包
+    private Handler handler;
 
     /**
      * 获取当前设备的本地IP地址
@@ -1041,12 +1042,27 @@ public class ScreenCaptureActivity extends AppCompatActivity {
      */
     private void handleCarTouchEvent(MotionEvent event) {
         // 将触摸事件传递给虚拟屏上的DemoPresentation
-        Log.d(TAG, "处理车机触摸事件: action=" + event.getAction() + ", x=" + event.getX() + ", y=" + event.getY());
+        Log.i(TAG, "处理车机触摸事件: action=" + event.getAction() + ", x=" + event.getX() + ", y=" + event.getY());
         
         if (mDemoPresentation != null) {
-            // 直接将触摸事件传递给DemoPresentation
-            mDemoPresentation.onTouchEvent(event);
-            Log.d(TAG, "触摸事件已传递给DemoPresentation");
+            // 复制MotionEvent，因为原始event会在回调后被回收
+            // Handler.post()是异步的，必须使用副本
+            final MotionEvent eventCopy = MotionEvent.obtain(event);
+            
+            if (handler == null) {
+                handler = new Handler(Looper.getMainLooper());
+            }
+            handler.post(() -> {
+                try {
+                    if (mDemoPresentation != null) {
+                        mDemoPresentation.onTouchEvent(eventCopy);
+                    }
+                } finally {
+                    // 使用完后回收副本
+                    eventCopy.recycle();
+                }
+            });
+            Log.i(TAG, "触摸事件已传递给DemoPresentation");
         }
     }
     

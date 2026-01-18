@@ -55,6 +55,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
     private HandlerThread decodingThread;
     private Handler decodingHandler;
     private ExecutorService executorService;
+    // 独立的触摸事件发送线程池，避免被视频接收阻塞
+    private ExecutorService touchEventExecutor;
 
     private boolean isRunning = false;
     private int frameCount = 0;
@@ -268,6 +270,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
         
         // 创建新的线程池
         executorService = Executors.newSingleThreadExecutor();
+        
+        // 创建触摸事件发送线程池（独立于视频接收线程）
+        if (touchEventExecutor == null || touchEventExecutor.isShutdown()) {
+            touchEventExecutor = Executors.newSingleThreadExecutor();
+        }
         
         executorService.execute(() -> {
             try {
@@ -1402,36 +1409,80 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
     /**
      * 发送触摸事件到客户端
      */
+    // 服务端 VirtualDisplay 的分辨率
+    private static final int SERVER_VIDEO_WIDTH = 1280;
+    private static final int SERVER_VIDEO_HEIGHT = 720;
+    
+    // SurfaceView 的实际像素尺寸（在 surfaceChanged 时更新）
+    private int surfaceViewWidth = 0;
+    private int surfaceViewHeight = 0;
+    
     private void sendTouchEvent(MotionEvent event) {
-        if (outputStream == null || !clientSocket.isConnected()) {
+        // 添加详细的状态检查日志
+        Log.i(TAG, "sendTouchEvent: outputStream=" + (outputStream != null) + 
+              ", clientSocket=" + (clientSocket != null) + 
+              ", isConnected=" + (clientSocket != null && clientSocket.isConnected()));
+        
+        if (outputStream == null || clientSocket == null || !clientSocket.isConnected()) {
             Log.e(TAG, "Socket未连接，无法发送触摸事件");
             return;
         }
+        
+        // 获取触摸坐标
+        float touchX = event.getX();
+        float touchY = event.getY();
+        int action = event.getAction();
+        
+        // 坐标转换：将 SurfaceView 坐标转换为服务端 VirtualDisplay 坐标
+        int serverX, serverY;
+        if (surfaceViewWidth > 0 && surfaceViewHeight > 0) {
+            // 按比例转换坐标
+            serverX = (int) (touchX * SERVER_VIDEO_WIDTH / surfaceViewWidth);
+            serverY = (int) (touchY * SERVER_VIDEO_HEIGHT / surfaceViewHeight);
+            
+            // 确保坐标在有效范围内
+            serverX = Math.max(0, Math.min(serverX, SERVER_VIDEO_WIDTH - 1));
+            serverY = Math.max(0, Math.min(serverY, SERVER_VIDEO_HEIGHT - 1));
+        } else {
+            // 如果 SurfaceView 尺寸未知，直接使用原始坐标
+            serverX = (int) touchX;
+            serverY = (int) touchY;
+        }
 
-        executorService.execute(() -> {
+        final int finalX = serverX;
+        final int finalY = serverY;
+        
+        if (touchEventExecutor == null || touchEventExecutor.isShutdown()) {
+            Log.e(TAG, "touchEventExecutor未初始化或已关闭，无法发送触摸事件");
+            return;
+        }
+        
+        touchEventExecutor.execute(() -> {
+            Log.i(TAG, "开始发送触摸事件数据...");
             try {
-                // 构建触摸事件数据
-                int action = event.getAction();
-                int x = (int) event.getX();
-                int y = (int) event.getY();
-
-                // 发送触摸事件
+                // 构建触摸事件数据：10字节
+                // [0]: 'T' 事件类型标识
+                // [1]: action (触摸动作)
+                // [2-5]: x 坐标 (big-endian)
+                // [6-9]: y 坐标 (big-endian)
                 byte[] touchData = new byte[10];
-                touchData[0] = (byte) 'T'; // 事件类型
+                touchData[0] = (byte) 'T';
                 touchData[1] = (byte) (action & 0xFF);
-                touchData[2] = (byte) (x >> 24 & 0xFF);
-                touchData[3] = (byte) (x >> 16 & 0xFF);
-                touchData[4] = (byte) (x >> 8 & 0xFF);
-                touchData[5] = (byte) (x & 0xFF);
-                touchData[6] = (byte) (y >> 24 & 0xFF);
-                touchData[7] = (byte) (y >> 16 & 0xFF);
-                touchData[8] = (byte) (y >> 8 & 0xFF);
-                touchData[9] = (byte) (y & 0xFF);
+                touchData[2] = (byte) (finalX >> 24 & 0xFF);
+                touchData[3] = (byte) (finalX >> 16 & 0xFF);
+                touchData[4] = (byte) (finalX >> 8 & 0xFF);
+                touchData[5] = (byte) (finalX & 0xFF);
+                touchData[6] = (byte) (finalY >> 24 & 0xFF);
+                touchData[7] = (byte) (finalY >> 16 & 0xFF);
+                touchData[8] = (byte) (finalY >> 8 & 0xFF);
+                touchData[9] = (byte) (finalY & 0xFF);
 
                 outputStream.write(touchData);
                 outputStream.flush();
 
-                Log.d(TAG, "发送触摸事件: action=" + action + ", x=" + x + ", y=" + y);
+                Log.i(TAG, "发送触摸事件: action=" + action + 
+                      ", 原始坐标=(" + (int)touchX + "," + (int)touchY + ")" +
+                      ", 转换后=(" + finalX + "," + finalY + ")");
 
             } catch (IOException e) {
                 Log.e(TAG, "发送触摸事件失败: " + e.getMessage(), e);
@@ -1459,6 +1510,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
         Log.i(TAG, "===== Surface已更改: " + width + "x" + height + " =====");
         surfaceHolder = holder;
         surfaceReady = true;
+        
+        // 保存 SurfaceView 的实际像素尺寸，用于触摸坐标转换
+        surfaceViewWidth = width;
+        surfaceViewHeight = height;
+        Log.i(TAG, "SurfaceView 实际尺寸已更新: " + surfaceViewWidth + "x" + surfaceViewHeight);
         
         // Surface尺寸变化，可能需要重新配置解码器
         // 但为了避免重复配置，只在必要时重新配置
@@ -1547,6 +1603,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
 
     @Override
     public boolean onTouch(View v, MotionEvent event) {
+        Log.i(TAG, "onTouch 被调用: action=" + event.getAction() + ", x=" + event.getX() + ", y=" + event.getY());
         sendTouchEvent(event);
         return true;
     }
@@ -1607,6 +1664,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
         if (executorService != null) {
             executorService.shutdown();
             executorService = null;
+        }
+        if (touchEventExecutor != null) {
+            touchEventExecutor.shutdown();
+            touchEventExecutor = null;
         }
         
         // 清除缓存
