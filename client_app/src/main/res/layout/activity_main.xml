@@ -8,19 +8,21 @@
     tools:context=".MainActivity">
 
     <!-- SurfaceView for displaying decoded video -->
+    <!-- 使用 0dp 配合 constraintDimensionRatio 来保持 16:9 比例并自适应屏幕 -->
     <SurfaceView
         android:id="@+id/surfaceView"
-        android:layout_width="1280dp"
-        android:layout_height="720dp"
-        android:layout_gravity="center"
-        app:layout_constraintBottom_toBottomOf="parent"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toTopOf="@+id/info_panel"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintDimensionRatio="16:9" />
+        app:layout_constraintDimensionRatio="H,16:9"
+        app:layout_constraintVertical_bias="0.5" />
 
     <!-- Info panel -->
     <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/info_panel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_margin="16dp"

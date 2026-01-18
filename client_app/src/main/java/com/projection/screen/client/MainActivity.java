@@ -125,7 +125,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
         tvPort = findViewById(R.id.tv_port);
         tvStatus = findViewById(R.id.tv_status);
 
-        // SurfaceView的尺寸已在XML布局中设置为1280dp x 720dp
+        // SurfaceView在布局中使用 constraintDimensionRatio="H,16:9" 自适应屏幕
         // 获取并打印实际的SurfaceView尺寸
         ViewTreeObserver vto = surfaceView.getViewTreeObserver();
         vto.addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
