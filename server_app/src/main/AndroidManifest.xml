@@ -40,6 +40,17 @@
             </intent-filter>
         </activity>
         
+        <activity
+            android:name=".MainScreenActivity"
+            android:exported="false"
+            android:launchMode="singleTask" />
+        
+        <service
+            android:name=".ProjectionService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+        
     </application>
 
 </manifest>

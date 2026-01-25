@@ -1,6 +1,12 @@
 package com.projection.screen.server;
 
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.content.ServiceConnection;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.os.IBinder;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.hardware.display.DisplayManager;
@@ -10,6 +16,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -23,6 +30,8 @@ import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.ListView;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -64,8 +73,20 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     /** VirtualDisplay实例，代表一个虚拟显示设备，用于捕获屏幕内容 */
     private VirtualDisplay mVirtualDisplay;
     
+    /** MediaProjectionManager实例，用于创建MediaProjection */
+    private MediaProjectionManager mMediaProjectionManager;
+    
+    /** ProjectionService实例 */
+    private ProjectionService mProjectionService;
+    
+    /** Service连接 */
+    private ServiceConnection mServiceConnection;
+    
     /** Surface实例，作为编码器的输入目标，虚拟屏内容将渲染到这个Surface上 */
     private Surface mInputSurface;
+    
+    /** 投屏模式：true=主屏幕，false=虚拟屏 */
+    private boolean isMainScreenMode = false;
 
     // 参数配置
     /** 虚拟屏和编码输出的宽度（像素） */
@@ -112,6 +133,9 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     private TextView mCurrentIp;
     private TextView mStatusText;
     private ListView mDeviceList;
+    private RadioGroup mProjectionModeGroup;
+    private RadioButton mRadioVirtualDisplay;
+    private RadioButton mRadioMainScreen;
     
     // 设备列表和适配器
     private ArrayAdapter<String> mDeviceListAdapter;
@@ -126,6 +150,9 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     private static final int HEARTBEAT_INTERVAL = 3000; // 3秒发送一次心跳
     private static final byte[] HEARTBEAT_DATA = new byte[]{'H', 'B'}; // 心跳数据包
     private Handler handler;
+    
+    // MediaProjection请求码
+    private static final int REQUEST_MEDIA_PROJECTION = 1001;
 
     /**
      * 获取当前设备的本地IP地址
@@ -335,17 +362,244 @@ public class ScreenCaptureActivity extends AppCompatActivity {
 
     
     /**
-     * 配置MediaCodec编码器和创建VirtualDisplay
+     * 重新配置编码器以适应当前模式（在模式切换时调用）
+     */
+    private void reconfigureEncoderForCurrentMode() {
+        if (mExecutorService == null || mExecutorService.isShutdown()) {
+            mExecutorService = Executors.newSingleThreadExecutor();
+        }
+        
+        mExecutorService.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Log.i(TAG, "开始重新配置编码器，当前模式: " + (isMainScreenMode ? "主屏幕" : "虚拟屏"));
+                    
+                    // 清理旧模式的资源
+                    if (isMainScreenMode) {
+                        // 切换到主屏幕模式：清理虚拟屏模式的资源
+                        if (mCodec != null) {
+                            try {
+                                mCodec.stop();
+                                mCodec.release();
+                                mCodec = null;
+                                Log.i(TAG, "已停止虚拟屏模式的编码器");
+                            } catch (Exception e) {
+                                Log.w(TAG, "停止虚拟屏编码器失败: " + e.getMessage());
+                                mCodec = null;
+                            }
+                        }
+                        if (mVirtualDisplay != null) {
+                            try {
+                                mVirtualDisplay.release();
+                                mVirtualDisplay = null;
+                                Log.i(TAG, "已释放虚拟屏模式的VirtualDisplay");
+                            } catch (Exception e) {
+                                Log.w(TAG, "释放虚拟屏VirtualDisplay失败: " + e.getMessage());
+                                mVirtualDisplay = null;
+                            }
+                        }
+                        if (mDemoPresentation != null) {
+                            mDemoPresentation.dismiss();
+                            mDemoPresentation = null;
+                            Log.i(TAG, "已关闭虚拟屏模式的DemoPresentation");
+                        }
+                    } else {
+                        // 切换到虚拟屏模式：清理主屏幕模式的资源
+                        // 先停止服务（这会释放服务中的编码器）
+                        if (mProjectionService != null) {
+                            Intent serviceIntent = new Intent(ScreenCaptureActivity.this, ProjectionService.class);
+                            stopService(serviceIntent);
+                            Log.i(TAG, "已停止主屏幕模式的服务");
+                        }
+                        
+                        // 等待一小段时间，确保服务中的编码器回调执行完毕
+                        try {
+                            Thread.sleep(200);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        
+                        // 清空服务引用，防止编码回调中访问已释放的服务
+                        mProjectionService = null;
+                        
+                        if (mServiceConnection != null) {
+                            try {
+                                unbindService(mServiceConnection);
+                                Log.i(TAG, "已解绑主屏幕模式的服务");
+                            } catch (Exception e) {
+                                Log.w(TAG, "解绑服务失败: " + e.getMessage());
+                            }
+                            mServiceConnection = null;
+                        }
+                    }
+                    
+                    // 重置MediaMuxer状态（重新配置编码器时需要重新初始化）
+                    // 注意：必须在停止编码器之后重置，避免编码回调访问已释放的MediaMuxer
+                    if (mMediaMuxer != null) {
+                        try {
+                            if (mIsMuxerStarted) {
+                                mMediaMuxer.stop();
+                            }
+                            mMediaMuxer.release();
+                        } catch (Exception e) {
+                            Log.w(TAG, "释放旧MediaMuxer失败: " + e.getMessage());
+                        }
+                        mMediaMuxer = null;
+                        mIsMuxerStarted = false;
+                        mVideoTrackIndex = -1;
+                        Log.i(TAG, "已重置MediaMuxer状态");
+                    }
+                    
+                    // 重新初始化H.264文件记录（因为MediaMuxer已重置）
+                    initH264Recording();
+                    
+                    // 重新配置编码器
+                    configureMediaCodecAndCreateVirtualDisplay();
+                    Log.i(TAG, "编码器重新配置完成");
+                    
+                    // 发送缓存的SPS/PPS（如果有）
+                    if (cachedSPSWithStartCode != null && cachedPPSWithStartCode != null) {
+                        Log.i(TAG, "发送缓存的SPS/PPS数据");
+                        sendH264DataToCar(cachedSPSWithStartCode);
+                        sendH264DataToCar(cachedPPSWithStartCode);
+                    }
+                } catch (IOException e) {
+                    Log.e(TAG, "重新配置编码器失败: " + e.getMessage(), e);
+                    runOnUiThread(() -> {
+                        Toast.makeText(ScreenCaptureActivity.this, "重新配置编码器失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    });
+                }
+            }
+        });
+    }
+    
+    /**
+     * 配置MediaCodec编码器和创建VirtualDisplay或MediaProjection
      * <p>
      * 该方法在成功连接到车机后调用，执行以下操作：
      * 1. 配置MediaCodec编码器，设置编码参数
-     * 2. 创建VirtualDisplay虚拟屏，绑定到编码器的输入Surface
+     * 2. 根据模式选择创建VirtualDisplay虚拟屏或MediaProjection主屏幕捕获
      * 3. 设置MediaCodec回调，处理编码输出数据
      * 
      * @throws IOException 如果MediaCodec创建失败
      */
     private void configureMediaCodecAndCreateVirtualDisplay() throws IOException {
-        Log.i(TAG, "configureMediaCodecAndCreateVirtualDisplay: ");
+        if (isMainScreenMode) {
+            // 主屏幕模式：需要先请求MediaProjection权限
+            // 注意：RESULT_OK的值是-1，所以用-2表示未设置
+            if (mMediaProjectionResultCode == -2 || mMediaProjectionData == null) {
+                Log.i(TAG, "主屏幕模式：请求MediaProjection权限");
+                requestMediaProjectionPermission();
+                return; // 等待权限回调
+            }
+            // 权限已获取，启动服务
+            configureMediaCodecAndCreateMediaProjection();
+        } else {
+            // 虚拟屏模式：使用原有逻辑
+            configureMediaCodecAndCreateVirtualDisplayInternal();
+        }
+    }
+    
+    /**
+     * 请求MediaProjection权限
+     */
+    private void requestMediaProjectionPermission() {
+        if (mMediaProjectionManager == null) {
+            Log.e(TAG, "MediaProjectionManager未初始化");
+            return;
+        }
+        Intent captureIntent = mMediaProjectionManager.createScreenCaptureIntent();
+        startActivityForResult(captureIntent, REQUEST_MEDIA_PROJECTION);
+    }
+    
+    // 保存MediaProjection的resultCode和data
+    // 注意：RESULT_OK的值是-1，所以用-2表示未设置
+    private int mMediaProjectionResultCode = -2;
+    private Intent mMediaProjectionData = null;
+    
+    /**
+     * 配置MediaCodec编码器和创建MediaProjection（主屏幕捕获）
+     * 通过前台服务来处理MediaProjection
+     */
+    private void configureMediaCodecAndCreateMediaProjection() {
+        Log.i(TAG, "configureMediaCodecAndCreateMediaProjection: 主屏幕模式");
+        Log.i(TAG, "检查MediaProjection数据: resultCode=" + mMediaProjectionResultCode + ", data=" + mMediaProjectionData);
+        
+        // 注意：RESULT_OK的值是-1，所以用-2表示未设置
+        if (mMediaProjectionResultCode == -2 || mMediaProjectionData == null) {
+            Log.e(TAG, "MediaProjection数据无效，无法启动服务: resultCode=" + mMediaProjectionResultCode + ", data=" + mMediaProjectionData);
+            return;
+        }
+        
+        // 启动前台服务，传递resultCode和data
+        Intent serviceIntent = new Intent(this, ProjectionService.class);
+        serviceIntent.putExtra("result_code", mMediaProjectionResultCode);
+        serviceIntent.putExtra("data", mMediaProjectionData);
+        
+        // 绑定服务
+        mServiceConnection = new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                Log.i(TAG, "ProjectionService已连接");
+                ProjectionService.LocalBinder binder = (ProjectionService.LocalBinder) service;
+                mProjectionService = binder.getService();
+                
+                // 等待编码器创建完成（服务可能在后台线程中创建编码器）
+                Handler handler = new Handler(Looper.getMainLooper());
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        // 检查Socket和编码器是否都准备好了
+                        if (mSocket == null || mOutputStream == null) {
+                            Log.w(TAG, "Socket尚未准备好，100ms后重试");
+                            handler.postDelayed(this, 100);
+                            return;
+                        }
+                        
+                        mCodec = mProjectionService.getCodec();
+                        if (mCodec != null) {
+                            // 先设置Socket，再设置编码回调
+                            mProjectionService.setSocket(mSocket, mOutputStream);
+                            Log.i(TAG, "Socket和OutputStream已传递给服务");
+                            
+                            mProjectionService.setCodecCallback(createMediaCodecCallback());
+                            Log.i(TAG, "编码回调已设置");
+                            
+                            // 启动MainScreenActivity
+                            Intent intent = new Intent(ScreenCaptureActivity.this, MainScreenActivity.class);
+                            startActivity(intent);
+                            Log.i(TAG, "MainScreenActivity已启动");
+                        } else {
+                            Log.w(TAG, "编码器尚未创建，100ms后重试");
+                            handler.postDelayed(this, 100);
+                        }
+                    }
+                }, 100); // 延迟100ms等待服务创建编码器
+            }
+            
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+                Log.i(TAG, "ProjectionService已断开");
+                mProjectionService = null;
+            }
+        };
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
+        bindService(serviceIntent, mServiceConnection, Context.BIND_AUTO_CREATE);
+    }
+    
+    /**
+     * 配置MediaCodec编码器和创建VirtualDisplay（虚拟屏模式）
+     * 
+     * @throws IOException 如果MediaCodec创建失败
+     */
+    private void configureMediaCodecAndCreateVirtualDisplayInternal() throws IOException {
+        Log.i(TAG, "configureMediaCodecAndCreateVirtualDisplayInternal: 虚拟屏模式");
         // 1. 配置 MediaCodec 编码器
         // 创建视频格式：H.264编码，指定宽度、高度
         MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, WIDTH, HEIGHT);
@@ -373,7 +627,87 @@ public class ScreenCaptureActivity extends AppCompatActivity {
         mInputSurface = mCodec.createInputSurface();
         
         // 设置编码回调，处理编码后的数据 - 必须在start()之前调用
-        mCodec.setCallback(new MediaCodec.Callback() {
+        mCodec.setCallback(createMediaCodecCallback());
+        
+        // 启动编码器
+        mCodec.start();
+
+        // 获取当前手机屏幕的指标（用于参考，实际使用手动指定的密度）
+        DisplayMetrics metrics = new DisplayMetrics();
+        getWindowManager().getDefaultDisplay().getMetrics(metrics);
+        int density = DisplayMetrics.DENSITY_DEFAULT;
+        Log.d(TAG, "startProjection: 屏幕密度=" + density);
+
+        // 2. 创建 Virtual Display
+        DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        
+        if (displayManager == null) {
+            Log.e(TAG, "DisplayManager获取失败，无法创建虚拟显示");
+            throw new IOException("DisplayManager获取失败");
+        }
+        
+        if (mInputSurface == null) {
+            Log.e(TAG, "输入Surface获取失败，无法创建虚拟显示");
+            throw new IOException("输入Surface获取失败");
+        }
+        
+        try {
+            mVirtualDisplay = displayManager.createVirtualDisplay(
+                    "CarScreen",
+                    WIDTH, HEIGHT, density,
+                    mInputSurface,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY | 
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC |
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+            );
+            
+            if (mVirtualDisplay == null) {
+                throw new IOException("虚拟屏创建失败");
+            }
+            
+            Log.i(TAG, "虚拟屏创建成功: 宽=" + WIDTH + " 高=" + HEIGHT + " 密度=" + density);
+        } catch (Exception e) {
+            Log.e(TAG, "创建虚拟屏失败: " + e.getMessage(), e);
+            throw new IOException("创建虚拟屏失败", e);
+        }
+        
+        // 3. 在虚拟屏上显示DemoPresentation
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Display[] displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+                Log.i(TAG, "找到 " + displays.length + " 个演示显示设备");
+                for (Display display : displays) {
+                    if (display.getName().equals("CarScreen")) {
+                        try {
+                            mDemoPresentation = new DemoPresentation(ScreenCaptureActivity.this, display);
+                            mDemoPresentation.show();
+                            Log.i(TAG, "在虚拟屏上显示DemoPresentation成功");
+                            break;
+                        } catch (Exception e) {
+                            Log.e(TAG, "创建或显示DemoPresentation失败: " + e.getMessage(), e);
+                        }
+                    }
+                }
+                
+                if (mDemoPresentation == null && displays.length > 0) {
+                    try {
+                        mDemoPresentation = new DemoPresentation(ScreenCaptureActivity.this, displays[0]);
+                        mDemoPresentation.show();
+                        Log.i(TAG, "在第一个显示屏上显示DemoPresentation成功");
+                    } catch (Exception e) {
+                        Log.e(TAG, "创建或显示DemoPresentation失败: " + e.getMessage(), e);
+                    }
+                }
+            }
+        });
+    }
+    
+    /**
+     * 创建MediaCodec回调
+     */
+    private MediaCodec.Callback createMediaCodecCallback() {
+        return new MediaCodec.Callback() {
             /**
              * 处理编码器错误
              * @param codec 发生错误的编码器实例
@@ -402,25 +736,79 @@ public class ScreenCaptureActivity extends AppCompatActivity {
              */
             @Override
             public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
+                // 检查编码器是否仍然有效
+                if (codec == null) {
+                    Log.w(TAG, "编码器为null，忽略输出缓冲区");
+                    return;
+                }
+                
+                // 检查当前模式是否匹配（防止模式切换后回调还在执行）
+                boolean shouldProcess = false;
+                if (isMainScreenMode) {
+                    // 主屏幕模式：检查服务是否存在，并且编码器引用匹配
+                    // 注意：主屏幕模式下，mCodec可能是服务中的编码器引用
+                    if (mProjectionService != null) {
+                        MediaCodec serviceCodec = mProjectionService.getCodec();
+                        shouldProcess = (serviceCodec == codec);
+                    }
+                } else {
+                    // 虚拟屏模式：检查Activity中的编码器引用是否匹配
+                    shouldProcess = (mCodec == codec && mCodec != null);
+                }
+                
+                if (!shouldProcess) {
+                    Log.w(TAG, "编码器不匹配或模式已切换，释放缓冲区但不处理数据。isMainScreenMode=" + isMainScreenMode + ", mCodec=" + mCodec + ", codec=" + codec);
+                    try {
+                        codec.releaseOutputBuffer(index, false);
+                    } catch (IllegalStateException e) {
+                        Log.w(TAG, "释放输出缓冲区失败（编码器可能已释放）: " + e.getMessage());
+                    }
+                    return;
+                }
+                
                 // 获取输出缓冲区
-                ByteBuffer outputBuffer = codec.getOutputBuffer(index);
+                ByteBuffer outputBuffer = null;
+                try {
+                    outputBuffer = codec.getOutputBuffer(index);
+                } catch (IllegalStateException e) {
+                    Log.w(TAG, "获取输出缓冲区失败（编码器可能已释放）: " + e.getMessage());
+                    try {
+                        codec.releaseOutputBuffer(index, false);
+                    } catch (IllegalStateException e2) {
+                        // 忽略
+                    }
+                    return;
+                }
                 
                 if (outputBuffer == null) {
                     Log.e(TAG, "输出缓冲区为空，无法获取编码数据");
-                    codec.releaseOutputBuffer(index, false);
+                    try {
+                        codec.releaseOutputBuffer(index, false);
+                    } catch (IllegalStateException e) {
+                        Log.w(TAG, "释放输出缓冲区失败: " + e.getMessage());
+                    }
                     return;
                 }
                 
                 Log.d(TAG, "编码完成一帧数据: 大小=" + info.size + " 字节, 时间戳=" + info.presentationTimeUs + "us, 标志=" + info.flags);
                 
                 // 使用MediaMuxer将数据写入MP4文件
+                // 注意：需要检查MediaMuxer状态，避免访问已释放的MediaMuxer
                 if (mIsMuxerStarted && mVideoTrackIndex != -1 && mMediaMuxer != null) {
-                    // 确保ByteBuffer的position和limit正确
-                    outputBuffer.position(info.offset);
-                    outputBuffer.limit(info.offset + info.size);
-                    
-                    // 将数据写入MP4文件
-                    mMediaMuxer.writeSampleData(mVideoTrackIndex, outputBuffer, info);
+                    try {
+                        // 确保ByteBuffer的position和limit正确
+                        outputBuffer.position(info.offset);
+                        outputBuffer.limit(info.offset + info.size);
+                        
+                        // 将数据写入MP4文件
+                        mMediaMuxer.writeSampleData(mVideoTrackIndex, outputBuffer, info);
+                    } catch (IllegalStateException e) {
+                        // MediaMuxer可能已经被释放或状态不正确
+                        Log.w(TAG, "写入MediaMuxer失败（可能已释放）: " + e.getMessage());
+                        mMediaMuxer = null;
+                        mIsMuxerStarted = false;
+                        mVideoTrackIndex = -1;
+                    }
                 }
                 
                 // 将编码后的数据复制到字节数组中
@@ -432,10 +820,19 @@ public class ScreenCaptureActivity extends AppCompatActivity {
                 outputBuffer.get(h264Data);
                 
                 // 发送H.264数据到车机
-                sendH264DataToCar(h264Data);
+                // 主屏幕模式下，通过服务发送；虚拟屏模式下，直接发送
+                if (isMainScreenMode && mProjectionService != null) {
+                    mProjectionService.sendH264Data(h264Data);
+                } else {
+                    sendH264DataToCar(h264Data);
+                }
                 
                 // 释放输出缓冲区，以便编码器可以继续使用它
-                codec.releaseOutputBuffer(index, false);
+                try {
+                    codec.releaseOutputBuffer(index, false);
+                } catch (IllegalStateException e) {
+                    Log.w(TAG, "释放输出缓冲区失败（编码器可能已释放）: " + e.getMessage());
+                }
             }
 
             /**
@@ -499,122 +896,43 @@ public class ScreenCaptureActivity extends AppCompatActivity {
                     cachedPPSWithStartCode = ppsWithStartCode;
                     Log.i(TAG, "SPS/PPS数据已缓存");
                     
-                    sendH264DataToCar(spsWithStartCode);
-                    sendH264DataToCar(ppsWithStartCode);
+                    // 主屏幕模式下，通过服务发送；虚拟屏模式下，直接发送
+                    if (isMainScreenMode && mProjectionService != null) {
+                        mProjectionService.sendH264Data(spsWithStartCode);
+                        mProjectionService.sendH264Data(ppsWithStartCode);
+                    } else {
+                    // 主屏幕模式下，通过服务发送；虚拟屏模式下，直接发送
+                    if (isMainScreenMode && mProjectionService != null) {
+                        mProjectionService.sendH264Data(spsWithStartCode);
+                        mProjectionService.sendH264Data(ppsWithStartCode);
+                    } else {
+                        sendH264DataToCar(spsWithStartCode);
+                        sendH264DataToCar(ppsWithStartCode);
+                    }
+                    }
                 }
                 
                 // 使用MediaMuxer时，在输出格式改变时添加视频轨道
-                if (mMediaMuxer != null) {
-                    mVideoTrackIndex = mMediaMuxer.addTrack(format);
-                    // 开始混合（必须在添加所有轨道后调用）
-                    mMediaMuxer.start();
-                    mIsMuxerStarted = true;
-                    Log.i(TAG, "MediaMuxer已启动，视频轨道索引: " + mVideoTrackIndex);
-                }
-            }
-        });
-        
-        // 启动编码器
-        mCodec.start();
-
-        // 获取当前手机屏幕的指标（用于参考，实际使用手动指定的密度）
-        DisplayMetrics metrics = new DisplayMetrics();
-        getWindowManager().getDefaultDisplay().getMetrics(metrics);
-//        Log.d(TAG, "startProjection: 当前屏幕密度=" + metrics.density);
-
-        // 使用标准密度（160dpi），确保虚拟屏内容在不同设备上有一致的显示效果
-        int density = DisplayMetrics.DENSITY_DEFAULT;
-        Log.d(TAG, "startProjection: 屏幕密度=" + density);
-
-        // 2. 创建 Virtual Display
-        // 获取DisplayManager系统服务，用于创建和管理虚拟显示
-        DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-        
-        // 检查displayManager是否为null
-        if (displayManager == null) {
-            Log.e(TAG, "DisplayManager获取失败，无法创建虚拟显示");
-            throw new IOException("DisplayManager获取失败");
-        }
-        
-        // 检查mInputSurface是否为null
-        if (mInputSurface == null) {
-            Log.e(TAG, "输入Surface获取失败，无法创建虚拟显示");
-            throw new IOException("输入Surface获取失败");
-        }
-        
-        try {
-            // 创建虚拟显示
-            // 使用与ProjectionForegroundService相同的标志组合，确保虚拟屏能正确渲染
-            mVirtualDisplay = displayManager.createVirtualDisplay(
-                    "CarScreen",  // 虚拟屏名称，用于调试
-                    WIDTH, HEIGHT, density,  // 虚拟屏的宽、高、密度
-                    mInputSurface,  // 虚拟屏内容的渲染目标Surface
-                    // 使用合适的标志组合，确保虚拟屏内容能正确渲染
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY | 
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC |
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
-            );
-            
-            if (mVirtualDisplay == null) {
-                Log.e(TAG, "虚拟屏创建失败，返回null");
-                throw new IOException("虚拟屏创建失败");
-            }
-            
-            Log.i(TAG, "虚拟屏创建成功: 宽=" + WIDTH + " 高=" + HEIGHT + " 密度=" + density + " 名称=CarScreen");
-        } catch (SecurityException e) {
-            Log.e(TAG, "创建虚拟屏时权限不足: " + e.getMessage(), e);
-            throw new IOException("创建虚拟屏时权限不足", e);
-        } catch (IllegalArgumentException e) {
-            Log.e(TAG, "创建虚拟屏参数错误: " + e.getMessage(), e);
-            throw new IOException("创建虚拟屏参数错误", e);
-        } catch (Exception e) {
-            Log.e(TAG, "创建虚拟屏时发生未知错误: " + e.getMessage(), e);
-            throw new IOException("创建虚拟屏时发生未知错误", e);
-        }
-        
-        // 3. 在虚拟屏上显示DemoPresentation - 需要在主线程中执行
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                Display[] displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
-                Log.i(TAG, "找到 " + displays.length + " 个演示显示设备");
-                for (Display display : displays) {
-                    Log.i(TAG, "演示设备: ID=" + display.getDisplayId() + " 宽=" + display.getWidth() + " 高=" + display.getHeight());
-                    // 不严格匹配宽高，只要是我们创建的虚拟显示屏就使用
-                    if (display.getName().equals("CarScreen")) {
-                        Log.d(TAG, "找到名称匹配的虚拟显示屏: CarScreen");
-                        // 找到我们创建的虚拟显示屏
-                        try {
-                            mDemoPresentation = new DemoPresentation(ScreenCaptureActivity.this, display);
-                            mDemoPresentation.show();
-                            Log.i(TAG, "在虚拟屏(ID=" + display.getDisplayId() + ")上显示DemoPresentation成功");
-                            break;
-                        } catch (Exception e) {
-                            Log.e(TAG, "创建或显示DemoPresentation失败: " + e.getMessage(), e);
-                        }
+                // 注意：需要确保MediaMuxer已经初始化且未启动
+                if (mMediaMuxer != null && !mIsMuxerStarted) {
+                    try {
+                        mVideoTrackIndex = mMediaMuxer.addTrack(format);
+                        // 开始混合（必须在添加所有轨道后调用）
+                        mMediaMuxer.start();
+                        mIsMuxerStarted = true;
+                        Log.i(TAG, "MediaMuxer已启动，视频轨道索引: " + mVideoTrackIndex);
+                    } catch (IllegalStateException e) {
+                        Log.e(TAG, "MediaMuxer添加轨道失败: " + e.getMessage());
+                        // MediaMuxer可能已经释放或状态不正确，重置状态
+                        mMediaMuxer = null;
+                        mIsMuxerStarted = false;
+                        mVideoTrackIndex = -1;
                     }
-                }
-                
-                if (mDemoPresentation == null) {
-                    Log.e(TAG, "未找到匹配的虚拟显示屏来显示DemoPresentation");
-                    // 如果没有找到匹配的显示屏，尝试使用第一个显示屏
-                    if (displays.length > 0) {
-                        Log.i(TAG, "尝试使用第一个显示屏: ID=" + displays[0].getDisplayId());
-                        try {
-                            mDemoPresentation = new DemoPresentation(ScreenCaptureActivity.this, displays[0]);
-                            mDemoPresentation.show();
-                            Log.i(TAG, "在显示屏(ID=" + displays[0].getDisplayId() + ")上显示DemoPresentation成功");
-                        } catch (Exception e) {
-                            Log.e(TAG, "创建或显示DemoPresentation失败: " + e.getMessage(), e);
-                        }
-                    }
-                } else {
-                    Log.i(TAG, "DemoPresentation状态: isShowing=" + mDemoPresentation.isShowing());
+                } else if (mMediaMuxer != null && mIsMuxerStarted) {
+                    Log.w(TAG, "MediaMuxer已经启动，跳过添加轨道");
                 }
             }
-        });
-
-
+        };
     }
     
     /**
@@ -643,6 +961,12 @@ public class ScreenCaptureActivity extends AppCompatActivity {
                     mOutputStream = mSocket.getOutputStream();
                     Log.i(TAG, "成功连接到车机");
                     
+                    // 如果服务已连接，立即设置Socket
+                    if (mProjectionService != null) {
+                        mProjectionService.setSocket(mSocket, mOutputStream);
+                        Log.i(TAG, "Socket已更新到服务");
+                    }
+                    
                     // 更新连接状态
                     updateConnectionState(true);
                     
@@ -670,19 +994,87 @@ public class ScreenCaptureActivity extends AppCompatActivity {
                     // 连接成功后，配置MediaCodec编码器和创建VirtualDisplay
                     // 这会确保客户端能够收到完整的SPS/PPS和I帧
                     try {
-                        if (mCodec != null) {
-                            // 如果编码器已存在，先停止并释放
-                            mCodec.stop();
-                            mCodec.release();
-                            mCodec = null;
-                            Log.i(TAG, "旧编码器已停止并释放");
+                        // 如果当前模式与已存在的资源不匹配，先清理
+                        if (isMainScreenMode) {
+                            // 主屏幕模式：清理虚拟屏模式的资源
+                            if (mCodec != null) {
+                                try {
+                                    mCodec.stop();
+                                    mCodec.release();
+                                    mCodec = null;
+                                    Log.i(TAG, "清理虚拟屏模式的编码器");
+                                } catch (IllegalStateException e) {
+                                    Log.w(TAG, "清理编码器失败: " + e.getMessage());
+                                    mCodec = null;
+                                }
+                            }
+                            if (mVirtualDisplay != null) {
+                                try {
+                                    mVirtualDisplay.release();
+                                    mVirtualDisplay = null;
+                                    Log.i(TAG, "清理虚拟屏模式的VirtualDisplay");
+                                } catch (Exception e) {
+                                    Log.w(TAG, "清理VirtualDisplay失败: " + e.getMessage());
+                                    mVirtualDisplay = null;
+                                }
+                            }
+                            if (mDemoPresentation != null) {
+                                mDemoPresentation.dismiss();
+                                mDemoPresentation = null;
+                                Log.i(TAG, "清理虚拟屏模式的DemoPresentation");
+                            }
+                        } else {
+                            // 虚拟屏模式：清理主屏幕模式的资源
+                            if (mServiceConnection != null) {
+                                try {
+                                    unbindService(mServiceConnection);
+                                    Log.i(TAG, "清理主屏幕模式的服务连接");
+                                } catch (Exception e) {
+                                    Log.w(TAG, "解绑服务失败: " + e.getMessage());
+                                }
+                                mServiceConnection = null;
+                            }
+                            if (mProjectionService != null) {
+                                stopService(new Intent(ScreenCaptureActivity.this, ProjectionService.class));
+                                mProjectionService = null;
+                                Log.i(TAG, "清理主屏幕模式的服务");
+                            }
                         }
                         
-                        // 释放旧的VirtualDisplay
-                        if (mVirtualDisplay != null) {
-                            mVirtualDisplay.release();
+                        // 只在虚拟屏模式下才需要检查Activity中的编码器
+                        // 主屏幕模式下，编码器在服务中管理
+                        if (!isMainScreenMode && mCodec != null) {
+                            try {
+                                // 如果编码器已存在，先停止并释放
+                                mCodec.stop();
+                                mCodec.release();
+                                mCodec = null;
+                                Log.i(TAG, "旧编码器已停止并释放");
+                            } catch (IllegalStateException e) {
+                                // 编码器可能已经被释放，忽略错误
+                                Log.w(TAG, "编码器已被释放，无需停止: " + e.getMessage());
+                                mCodec = null;
+                            }
+                        } else if (isMainScreenMode && mCodec != null) {
+                            // 主屏幕模式下，Activity中的mCodec引用应该为null（编码器在服务中）
+                            Log.w(TAG, "主屏幕模式下发现Activity中的编码器引用，清空它");
+                            mCodec = null;
+                        }
+                        
+                        // 释放旧的VirtualDisplay（只在虚拟屏模式下）
+                        if (!isMainScreenMode && mVirtualDisplay != null) {
+                            try {
+                                mVirtualDisplay.release();
+                                mVirtualDisplay = null;
+                                Log.i(TAG, "旧虚拟屏已释放");
+                            } catch (Exception e) {
+                                Log.w(TAG, "释放虚拟屏失败: " + e.getMessage());
+                                mVirtualDisplay = null;
+                            }
+                        } else if (isMainScreenMode && mVirtualDisplay != null) {
+                            // 主屏幕模式下，VirtualDisplay在服务中，清空引用
+                            Log.w(TAG, "主屏幕模式下发现Activity中的VirtualDisplay引用，清空它");
                             mVirtualDisplay = null;
-                            Log.i(TAG, "旧虚拟屏已释放");
                         }
                         
                         // 先发送缓存的SPS/PPS（如果有）
@@ -973,33 +1365,67 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     /**
      * 处理来自车机的触摸事件
      * <p>
-     * 将触摸事件传递给虚拟屏上运行的应用程序
+     * 根据投屏模式将触摸事件传递给DemoPresentation或MainScreenActivity
      * 
      * @param event 触摸事件
      */
     private void handleCarTouchEvent(MotionEvent event) {
-        // 将触摸事件传递给虚拟屏上的DemoPresentation
-        Log.i(TAG, "处理车机触摸事件: action=" + event.getAction() + ", x=" + event.getX() + ", y=" + event.getY());
+        Log.i(TAG, "处理车机触摸事件: action=" + event.getAction() + ", x=" + event.getX() + ", y=" + event.getY() + ", 模式=" + (isMainScreenMode ? "主屏幕" : "虚拟屏"));
         
-        if (mDemoPresentation != null) {
-            // 复制MotionEvent，因为原始event会在回调后被回收
-            // Handler.post()是异步的，必须使用副本
-            final MotionEvent eventCopy = MotionEvent.obtain(event);
-            
-            if (handler == null) {
-                handler = new Handler(Looper.getMainLooper());
-            }
-            handler.post(() -> {
-                try {
+        final MotionEvent eventCopy = MotionEvent.obtain(event);
+        
+        if (handler == null) {
+            handler = new Handler(Looper.getMainLooper());
+        }
+        
+        handler.post(() -> {
+            try {
+                if (isMainScreenMode) {
+                    // 主屏幕模式：发送广播给MainScreenActivity
+                    Intent intent = new Intent("com.projection.screen.server.TOUCH_EVENT");
+                    intent.putExtra("action", eventCopy.getAction());
+                    intent.putExtra("x", eventCopy.getX());
+                    intent.putExtra("y", eventCopy.getY());
+                    intent.putExtra("pressure", eventCopy.getPressure());
+                    intent.putExtra("size", eventCopy.getSize());
+                    sendBroadcast(intent);
+                    Log.i(TAG, "触摸事件已通过广播发送给MainScreenActivity");
+                } else {
+                    // 虚拟屏模式：传递给DemoPresentation
                     if (mDemoPresentation != null) {
                         mDemoPresentation.onTouchEvent(eventCopy);
+                        Log.i(TAG, "触摸事件已传递给DemoPresentation");
                     }
-                } finally {
-                    // 使用完后回收副本
-                    eventCopy.recycle();
                 }
-            });
-            Log.i(TAG, "触摸事件已传递给DemoPresentation");
+            } finally {
+                eventCopy.recycle();
+            }
+        });
+    }
+    
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        
+        if (requestCode == REQUEST_MEDIA_PROJECTION) {
+            Log.i(TAG, "onActivityResult: requestCode=" + requestCode + ", resultCode=" + resultCode + ", data=" + data);
+            if (resultCode == RESULT_OK && data != null) {
+                Log.i(TAG, "MediaProjection权限已授予");
+                // 保存resultCode和data，传递给服务
+                mMediaProjectionResultCode = resultCode;
+                mMediaProjectionData = new Intent(data); // 创建副本，避免被回收
+                Log.i(TAG, "MediaProjection数据已保存: resultCode=" + mMediaProjectionResultCode + ", data=" + mMediaProjectionData);
+                
+                // 继续配置编码器和创建MediaProjection（通过服务）
+                configureMediaCodecAndCreateMediaProjection();
+            } else {
+                Log.e(TAG, "MediaProjection权限被拒绝");
+                runOnUiThread(() -> {
+                    mStatusText.setText("投屏失败: 需要屏幕录制权限");
+                    Toast.makeText(this, "需要屏幕录制权限才能投屏主屏幕", Toast.LENGTH_SHORT).show();
+                });
+                updateConnectionState(false);
+            }
         }
     }
     
@@ -1025,17 +1451,48 @@ public class ScreenCaptureActivity extends AppCompatActivity {
                 Log.i(TAG, "DemoPresentation已关闭");
             }
             
-            // 停止编码器
-            if (mCodec != null) {
-                mCodec.stop();
-                mCodec.release();
-                mCodec = null;
-            }
-            
-            // 释放虚拟屏
-            if (mVirtualDisplay != null) {
-                mVirtualDisplay.release();
-                mVirtualDisplay = null;
+            // 根据模式释放资源
+            if (isMainScreenMode) {
+                // 主屏幕模式：停止服务（服务会释放所有资源）
+                if (mServiceConnection != null) {
+                    try {
+                        unbindService(mServiceConnection);
+                        Log.i(TAG, "服务已解绑");
+                    } catch (Exception e) {
+                        Log.e(TAG, "解绑服务失败: " + e.getMessage());
+                    }
+                    mServiceConnection = null;
+                }
+                
+                if (mProjectionService != null) {
+                    stopService(new Intent(this, ProjectionService.class));
+                    mProjectionService = null;
+                    Log.i(TAG, "服务已停止");
+                }
+                
+                // 关闭MainScreenActivity（如果正在运行）
+                Intent intent = new Intent("com.projection.screen.server.TOUCH_EVENT");
+                intent.putExtra("finish", true);
+                sendBroadcast(intent);
+                Log.i(TAG, "MainScreenActivity关闭信号已发送");
+            } else {
+                // 虚拟屏模式：释放编码器和VirtualDisplay
+                if (mCodec != null) {
+                    try {
+                        mCodec.stop();
+                        mCodec.release();
+                        mCodec = null;
+                        Log.i(TAG, "编码器已释放");
+                    } catch (Exception e) {
+                        Log.e(TAG, "释放编码器失败: " + e.getMessage());
+                    }
+                }
+                
+                if (mVirtualDisplay != null) {
+                    mVirtualDisplay.release();
+                    mVirtualDisplay = null;
+                    Log.i(TAG, "虚拟屏已释放");
+                }
             }
             
             // 停止触摸事件接收
@@ -1087,9 +1544,15 @@ public class ScreenCaptureActivity extends AppCompatActivity {
         mCurrentIp = findViewById(R.id.current_ip);
         mStatusText = findViewById(R.id.status);
         mDeviceList = findViewById(R.id.device_list);
+        mProjectionModeGroup = findViewById(R.id.projection_mode_group);
+        mRadioVirtualDisplay = findViewById(R.id.radio_virtual_display);
+        mRadioMainScreen = findViewById(R.id.radio_main_screen);
         
         // 初始化心跳Handler
         mHeartbeatHandler = new Handler(Looper.getMainLooper());
+        
+        // 初始化MediaProjectionManager
+        mMediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         
         // 初始状态：断开连接按钮禁用
         mDisconnectButton.setEnabled(false);
@@ -1151,6 +1614,41 @@ public class ScreenCaptureActivity extends AppCompatActivity {
                 connectToSelectedDevice(deviceIp);
             }
         });
+        
+        // 投屏模式选择事件
+        mProjectionModeGroup.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(RadioGroup group, int checkedId) {
+                if (checkedId == R.id.radio_main_screen) {
+                    isMainScreenMode = true;
+                    Log.i(TAG, "投屏模式切换为：主屏幕");
+                    // 切换到主屏幕模式时，清空旧的MediaProjection数据（如果之前是虚拟屏模式）
+                    // 这样可以确保下次连接时重新请求权限
+                    mMediaProjectionResultCode = -2;
+                    mMediaProjectionData = null;
+                    Log.i(TAG, "切换到主屏幕模式：已清空MediaProjection数据");
+                    
+                    // 如果已连接，需要重新配置编码器
+                    if (isConnected && mSocket != null && mSocket.isConnected()) {
+                        Log.i(TAG, "模式切换且已连接，重新配置编码器");
+                        reconfigureEncoderForCurrentMode();
+                    }
+                } else if (checkedId == R.id.radio_virtual_display) {
+                    isMainScreenMode = false;
+                    Log.i(TAG, "投屏模式切换为：虚拟屏");
+                    // 虚拟屏模式下，清空MediaProjection数据（因为虚拟屏不需要MediaProjection）
+                    mMediaProjectionResultCode = -2;
+                    mMediaProjectionData = null;
+                    Log.i(TAG, "虚拟屏模式：已清空MediaProjection数据");
+                    
+                    // 如果已连接，需要重新配置编码器
+                    if (isConnected && mSocket != null && mSocket.isConnected()) {
+                        Log.i(TAG, "模式切换且已连接，重新配置编码器");
+                        reconfigureEncoderForCurrentMode();
+                    }
+                }
+            }
+        });
     }
     
     /**
@@ -1158,6 +1656,12 @@ public class ScreenCaptureActivity extends AppCompatActivity {
      */
     private void disconnectFromCarDevice() {
         Log.i(TAG, "用户主动断开连接");
+        
+        // 先更新状态，防止重复操作
+        if (!isConnected) {
+            Log.w(TAG, "已经处于未连接状态，无需断开");
+            return;
+        }
         
         // 停止心跳
         stopHeartbeat();
@@ -1169,30 +1673,88 @@ public class ScreenCaptureActivity extends AppCompatActivity {
             Log.e(TAG, "断开连接失败: " + e.getMessage(), e);
         }
         
-        // 释放编码器资源
-        if (mCodec != null) {
-            try {
-                mCodec.stop();
-                mCodec.release();
-                mCodec = null;
-            } catch (Exception e) {
-                Log.e(TAG, "释放编码器失败: " + e.getMessage());
+        // 停止触摸事件接收
+        if (mTouchEventReceiver != null) {
+            mTouchEventReceiver.release();
+            mTouchEventReceiver = null;
+        }
+        
+        // 根据模式释放资源
+        if (isMainScreenMode) {
+            // 主屏幕模式：停止服务（服务会释放所有资源）
+            if (mServiceConnection != null) {
+                try {
+                    unbindService(mServiceConnection);
+                    Log.i(TAG, "服务已解绑");
+                } catch (Exception e) {
+                    Log.e(TAG, "解绑服务失败: " + e.getMessage());
+                }
+                mServiceConnection = null;
             }
-        }
-        
-        // 释放虚拟屏
-        if (mVirtualDisplay != null) {
-            mVirtualDisplay.release();
+            
+            if (mProjectionService != null) {
+                stopService(new Intent(this, ProjectionService.class));
+                mProjectionService = null;
+                Log.i(TAG, "服务已停止");
+            }
+            
+            // 清空Activity中的编码器引用（主屏幕模式下编码器在服务中）
+            mCodec = null;
             mVirtualDisplay = null;
+            
+            // 清空MediaProjection数据（MediaProjection的resultData是一次性的，不能重复使用）
+            mMediaProjectionResultCode = -2;
+            mMediaProjectionData = null;
+            Log.i(TAG, "主屏幕模式断开连接：已清空MediaProjection数据，下次连接需要重新请求权限");
+            
+            // 关闭MainScreenActivity（如果正在运行）
+            Intent intent = new Intent("com.projection.screen.server.TOUCH_EVENT");
+            intent.putExtra("finish", true);
+            sendBroadcast(intent);
+            Log.i(TAG, "MainScreenActivity关闭信号已发送");
+        } else {
+            // 虚拟屏模式：释放编码器和VirtualDisplay
+            if (mCodec != null) {
+                try {
+                    mCodec.stop();
+                    mCodec.release();
+                    mCodec = null;
+                    Log.i(TAG, "编码器已释放");
+                } catch (IllegalStateException e) {
+                    // 编码器可能已经被释放，忽略错误
+                    Log.w(TAG, "编码器已被释放: " + e.getMessage());
+                    mCodec = null;
+                } catch (Exception e) {
+                    Log.e(TAG, "释放编码器失败: " + e.getMessage());
+                    mCodec = null;
+                }
+            }
+            
+            if (mVirtualDisplay != null) {
+                try {
+                    mVirtualDisplay.release();
+                    mVirtualDisplay = null;
+                    Log.i(TAG, "虚拟屏已释放");
+                } catch (Exception e) {
+                    Log.e(TAG, "释放虚拟屏失败: " + e.getMessage());
+                    mVirtualDisplay = null;
+                }
+            }
+            
+            // 关闭DemoPresentation
+            if (mDemoPresentation != null) {
+                mDemoPresentation.dismiss();
+                mDemoPresentation = null;
+                Log.i(TAG, "DemoPresentation已关闭");
+            }
+            
+            // 虚拟屏模式下，清空MediaProjection数据（因为虚拟屏不需要MediaProjection）
+            mMediaProjectionResultCode = -2;
+            mMediaProjectionData = null;
+            Log.i(TAG, "虚拟屏模式断开连接：已清空MediaProjection数据");
         }
         
-        // 关闭DemoPresentation
-        if (mDemoPresentation != null) {
-            mDemoPresentation.dismiss();
-            mDemoPresentation = null;
-        }
-        
-        // 更新连接状态
+        // 更新连接状态（最后更新，确保UI正确）
         updateConnectionState(false);
     }
     
@@ -1219,6 +1781,31 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     }
     
     /**
+     * 检查实际连接状态并同步
+     */
+    private void syncConnectionState() {
+        boolean actuallyConnected = false;
+        
+        if (isMainScreenMode) {
+            // 主屏幕模式：检查服务状态和Socket状态
+            if (mProjectionService != null && mSocket != null && mSocket.isConnected() && !mSocket.isClosed()) {
+                actuallyConnected = true;
+            }
+        } else {
+            // 虚拟屏模式：检查Socket状态
+            if (mSocket != null && mSocket.isConnected() && !mSocket.isClosed()) {
+                actuallyConnected = true;
+            }
+        }
+        
+        // 如果状态不一致，更新状态
+        if (actuallyConnected != isConnected) {
+            Log.w(TAG, "连接状态不一致，同步状态: " + isConnected + " -> " + actuallyConnected);
+            updateConnectionState(actuallyConnected);
+        }
+    }
+    
+    /**
      * 启动心跳发送
      */
     private void startHeartbeat() {
@@ -1240,9 +1827,17 @@ public class ScreenCaptureActivity extends AppCompatActivity {
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         public void run() {
+            // 同步连接状态
+            syncConnectionState();
+            
             if (isConnected && mSocket != null && mSocket.isConnected() && !mSocket.isClosed()) {
                 sendHeartbeat();
                 mHeartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL);
+            } else {
+                // 如果连接已断开，停止心跳并更新状态
+                Log.w(TAG, "心跳检测到连接已断开");
+                stopHeartbeat();
+                updateConnectionState(false);
             }
         }
     };

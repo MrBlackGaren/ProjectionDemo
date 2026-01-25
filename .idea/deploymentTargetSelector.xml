@@ -10,10 +10,18 @@
       </SelectionState>
       <SelectionState runConfigName="server_app">
         <option name="selectionMode" value="DROPDOWN" />
+        <DropdownSelection timestamp="2026-01-25T04:34:41.785126Z">
+          <Target type="DEFAULT_BOOT">
+            <handle>
+              <DeviceId pluginId="Default" identifier="serial=192.168.3.76:5555;connection=446fc938" />
+            </handle>
+          </Target>
+        </DropdownSelection>
+        <DialogSelection />
       </SelectionState>
       <SelectionState runConfigName="client_app">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-01-18T13:47:49.036333Z">
+        <DropdownSelection timestamp="2026-01-18T13:55:20.751727Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="Default" identifier="serial=192.168.3.74:5555;connection=1d8ccd92" />
