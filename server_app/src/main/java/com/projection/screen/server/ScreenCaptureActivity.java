@@ -1547,6 +1547,11 @@ public class ScreenCaptureActivity extends AppCompatActivity {
         mProjectionModeGroup = findViewById(R.id.projection_mode_group);
         mRadioVirtualDisplay = findViewById(R.id.radio_virtual_display);
         mRadioMainScreen = findViewById(R.id.radio_main_screen);
+        // 绑定按钮并设置点击事件
+        findViewById(R.id.btn_goto_audio).setOnClickListener(v -> {
+            Intent intent = new Intent(ScreenCaptureActivity.this, AudioCaptureActivity.class);
+            startActivity(intent);
+        });
         
         // 初始化心跳Handler
         mHeartbeatHandler = new Handler(Looper.getMainLooper());
